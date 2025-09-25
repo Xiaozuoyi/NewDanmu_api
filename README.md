@@ -35,7 +35,7 @@
 ## 本地运行
 1. **克隆仓库**：
    ```bash
-   git clone [<仓库地址>](https://github.com/Xiaozuoyi/NewDanmu_api.git)
+   git clone https://github.com/Xiaozuoyi/NewDanmu_api.git
    cd <项目目录>
    ```
 
