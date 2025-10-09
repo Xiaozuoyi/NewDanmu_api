@@ -1,6 +1,6 @@
 // 全局状态（Cloudflare 和 Vercel 都可能重用实例）
 // ⚠️ 不是持久化存储，每次冷启动会丢失
-const VERSION = "1.2.5";
+const VERSION = "1.3.0";
 let animes = [];
 let episodeIds = [];
 let episodeNum = 10001; // 全局变量，用于自增 ID
@@ -12,6 +12,8 @@ const MAX_ANIMES = 100;
 const vodAllowedPlatforms = ["qiyi", "bilibili1", "imgo", "youku", "qq"];
 const allowedPlatforms = ["qiyi", "bilibili1", "imgo", "youku", "qq", "renren", "hanjutv", "bahamut"];
 let envs = {};
+// 定义一个全局变量来记录每个 IP 地址的请求历史
+const requestHistory = new Map();
 
 // =====================
 // 环境变量处理
@@ -722,7 +724,7 @@ function groupDanmusByMinute(filteredDanmus, n) {
       return {
         cid: data.cid,
         p: data.p,
-        m: data.count > 1 ? `${message}X${data.count}` : message,
+        m: data.count > 1 ? `${message} x ${data.count}` : message,
         t: data.earliestT
       };
     });
@@ -4022,7 +4024,7 @@ async function getComment(path) {
   return jsonResponse({ count: danmus.length, comments: danmus });
 }
 
-async function handleRequest(req, env, deployPlatform) {
+async function handleRequest(req, env, deployPlatform, clientIp) {
   token = resolveToken(env);  // 每次请求动态获取，确保热更新环境变量后也能生效
   envs["token"] = encryptStr(token);
   otherServer = resolveOtherServer(env);
@@ -4053,6 +4055,7 @@ async function handleRequest(req, env, deployPlatform) {
   const method = req.method;
 
   log("info", `request url: ${JSON.stringify(url)}`);
+  log("info", `client ip: ${clientIp}`);
 
   function handleHomepage() {
     log("log", "Accessed homepage with repository information");
@@ -4150,6 +4153,35 @@ async function handleRequest(req, env, deployPlatform) {
 
   // GET /api/v2/comment/:commentId
   if (path.startsWith("/api/v2/comment/") && method === "GET") {
+    // 获取当前时间戳（单位：毫秒）
+    const currentTime = Date.now();
+    const oneMinute = 60 * 1000;  // 1分钟 = 60000 毫秒
+
+    // 检查该 IP 地址的历史请求
+    if (!requestHistory.has(clientIp)) {
+      // 如果该 IP 地址没有请求历史，初始化一个空队列
+      requestHistory.set(clientIp, []);
+    }
+
+    const history = requestHistory.get(clientIp);
+
+    // 过滤掉已经超出 1 分钟的请求
+    const recentRequests = history.filter(timestamp => currentTime - timestamp <= oneMinute);
+
+    // 如果最近的请求数量大于等于 3 次，则限制请求
+    if (recentRequests.length >= 3) {
+      return jsonResponse({
+        status: 429, // HTTP 429 Too Many Requests
+        body: `1分钟内同一IP只能请求弹幕3次，请稍后重试`,
+      });
+    }
+
+    // 将当前请求的时间戳添加到该 IP 地址的请求历史队列中
+    recentRequests.push(currentTime);
+
+    // 更新该 IP 地址的请求历史
+    requestHistory.set(clientIp, recentRequests);
+
     return getComment(path);
   }
 
@@ -4172,12 +4204,18 @@ async function handleRequest(req, env, deployPlatform) {
 // --- Cloudflare Workers 入口 ---
 export default {
   async fetch(request, env, ctx) {
-    return handleRequest(request, env, "cloudflare");
+    // 获取客户端的真实 IP
+    const clientIp = request.headers.get('cf-connecting-ip') || request.headers.get('x-forwarded-for') || 'unknown';
+
+    return handleRequest(request, env, "cloudflare", clientIp);
   },
 };
 
 // --- Vercel 入口 ---
 export async function vercelHandler(req, res) {
+  // 从请求头获取真实 IP
+  const clientIp = req.headers['x-forwarded-for'] || req.connection.remoteAddress || 'unknown';
+
   const cfReq = new Request(req.url, {
     method: req.method,
     headers: req.headers,
@@ -4187,7 +4225,7 @@ export async function vercelHandler(req, res) {
         : undefined,
   });
 
-  const response = await handleRequest(cfReq, process.env, "vercel");
+  const response = await handleRequest(cfReq, process.env, "vercel", clientIp);
 
   res.status(response.status);
   response.headers.forEach((value, key) => res.setHeader(key, value));
